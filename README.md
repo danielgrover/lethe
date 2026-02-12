@@ -30,7 +30,7 @@ mem = Lethe.put(mem, :alert, "Price spike detected", importance: 1.5)
 mem = Lethe.put(mem, :rule, "Never auto-deploy on Fridays", pinned: true)
 
 # Read entries — get/2 refreshes decay (rehearsal), peek/2 doesn't
-{mem, {:ok, entry}} = Lethe.get(mem, :insight)
+{{:ok, entry}, mem} = Lethe.get(mem, :insight)
 {:ok, entry} = Lethe.peek(mem, :alert)
 
 # Query by relevance
@@ -107,6 +107,17 @@ ACT-R inspired model blending recency and frequency through a sigmoid normalizat
 Lethe.new(decay_fn: :exponential, half_life: :timer.hours(2))
 ```
 
+### Custom
+
+You can provide a custom 3-arity function that receives the entry, current time, and options (including `:half_life`). Return a raw score — importance multiplication and clamping to 0.0..1.0 are applied automatically.
+
+```elixir
+Lethe.new(decay_fn: fn entry, now, _opts ->
+  seconds = DateTime.diff(now, entry.last_accessed_at)
+  max(1.0 - seconds / 3600, 0.0)
+end)
+```
+
 ## API Overview
 
 ### Creating and Configuring
@@ -114,7 +125,7 @@ Lethe.new(decay_fn: :exponential, half_life: :timer.hours(2))
 ```elixir
 mem = Lethe.new(
   max_entries: 100,               # hard cap (default: 100)
-  decay_fn: :combined,            # :exponential | :access_weighted | :combined
+  decay_fn: :combined,            # :exponential | :access_weighted | :combined | custom fn
   half_life: :timer.hours(1),     # decay half-life in ms (default: 3,600,000)
   eviction_threshold: 0.05,       # entries below this are evicted (default: 0.05)
   summarize_threshold: 0.15,      # entries below this are summarized (default: 0.15)
@@ -129,7 +140,7 @@ mem = Lethe.new(
 mem = Lethe.put(mem, "auto-keyed value")
 mem = Lethe.put(mem, :key, "explicit key")
 mem = Lethe.put(mem, :key, "value", importance: 1.5, pinned: true, metadata: %{source: :api})
-mem = Lethe.replace(mem, :key, "new value")       # update value, refresh access
+mem = Lethe.update(mem, :key, "new value")        # update value, refresh access
 mem = Lethe.touch(mem, :key)                       # refresh access without changing value
 mem = Lethe.touch(mem, :key, importance: 2.0)      # refresh + update importance
 mem = Lethe.delete(mem, :key)
@@ -139,7 +150,7 @@ mem = Lethe.clear(mem)                             # remove all entries, keep co
 ### Reading
 
 ```elixir
-{mem, {:ok, entry}} = Lethe.get(mem, :key)         # rehearsal (refreshes decay)
+{{:ok, entry}, mem} = Lethe.get(mem, :key)         # rehearsal (refreshes decay)
 {:ok, entry} = Lethe.peek(mem, :key)               # no side effects
 :error = Lethe.peek(mem, :missing)
 ```
@@ -266,13 +277,13 @@ end
 
 ## Serializability
 
-The `%Lethe{}` struct stores `:decay_fn` as an atom (always safe to serialize) and `:clock_fn` / `:summarize_fn` as anonymous functions. To serialize:
+The `%Lethe{}` struct stores `:decay_fn` as an atom when using built-in functions (always safe to serialize). `:clock_fn`, `:summarize_fn`, and custom `:decay_fn` functions are anonymous functions that cannot be serialized. To serialize:
 
-1. Set `:clock_fn` and `:summarize_fn` to `nil` before serializing
+1. Set any function fields to `nil` (or a built-in atom for `:decay_fn`) before serializing
 2. Re-attach them after deserialization
 
 ```elixir
-# Serialize
+# Serialize (using a built-in decay_fn)
 serializable = %{mem | clock_fn: nil, summarize_fn: nil}
 binary = :erlang.term_to_binary(serializable)
 

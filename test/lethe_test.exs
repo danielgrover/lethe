@@ -683,4 +683,50 @@ defmodule LetheTest do
       assert hd(evicted).value == "old value"
     end
   end
+
+  describe "serialization round-trip" do
+    test "struct survives term_to_binary/binary_to_term" do
+      mem =
+        Lethe.new(decay_fn: :exponential, max_entries: 50)
+        |> Lethe.put(:a, "hello", importance: 1.5, metadata: %{source: :test})
+        |> Lethe.put(:b, "world", pinned: true)
+
+      serializable = %{mem | clock_fn: nil, summarize_fn: nil}
+      binary = :erlang.term_to_binary(serializable)
+      restored = :erlang.binary_to_term(binary)
+
+      assert restored.max_entries == 50
+      assert restored.decay_fn == :exponential
+      assert Lethe.size(restored) == 2
+
+      {:ok, entry_a} = Lethe.peek(restored, :a)
+      assert entry_a.value == "hello"
+      assert entry_a.importance == 1.5
+      assert entry_a.metadata == %{source: :test}
+
+      {:ok, entry_b} = Lethe.peek(restored, :b)
+      assert entry_b.value == "world"
+      assert entry_b.pinned == true
+    end
+
+    test "restored struct supports operations after re-attaching clock_fn" do
+      mem =
+        Lethe.new(decay_fn: :exponential)
+        |> Lethe.put(:k, "value")
+
+      serializable = %{mem | clock_fn: nil, summarize_fn: nil}
+      binary = :erlang.term_to_binary(serializable)
+      restored = :erlang.binary_to_term(binary)
+
+      # Re-attach a clock and verify operations work
+      restored = %{restored | clock_fn: fn -> DateTime.utc_now() end}
+
+      score = Lethe.score(restored, :k)
+      assert is_float(score)
+      assert score >= 0.0 and score <= 1.0
+
+      restored = Lethe.put(restored, :new, "added after restore")
+      assert Lethe.size(restored) == 2
+    end
+  end
 end

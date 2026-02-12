@@ -96,4 +96,15 @@ defmodule Lethe.EnumerableTest do
     values = for entry <- mem, do: entry.value
     assert Enum.sort(values) == ["1", "2"]
   end
+
+  test "for comprehension with filter" do
+    mem =
+      Lethe.new()
+      |> Lethe.put(:a, "1", pinned: true)
+      |> Lethe.put(:b, "2")
+      |> Lethe.put(:c, "3", pinned: true)
+
+    keys = for entry <- mem, entry.pinned, do: entry.key
+    assert Enum.sort(keys) == [:a, :c]
+  end
 end
