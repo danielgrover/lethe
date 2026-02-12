@@ -145,12 +145,11 @@ defmodule Lethe do
   @doc """
   Retrieves an entry by key, refreshing its access metadata (rehearsal).
 
-  Returns `{{:ok, entry}, updated_mem}` or `{:error, mem}`.
-
-  Follows the Elixir convention of returning `{result, updated_structure}`
-  (see `Map.get_and_update/3`, `Map.pop/3`).
+  Returns `{entry, updated_mem}` if the key exists, or `{nil, mem}` if it
+  does not. Follows the Elixir convention for get-and-modify operations
+  (see `Map.pop/3`, `Map.get_and_update/3`).
   """
-  @spec get(t(), term()) :: {{:ok, Entry.t()}, t()} | {:error, t()}
+  @spec get(t(), term()) :: {Entry.t() | nil, t()}
   def get(%__MODULE__{} = mem, key) do
     case Map.fetch(mem.entries, key) do
       {:ok, entry} ->
@@ -158,10 +157,10 @@ defmodule Lethe do
           %{entry | last_accessed_at: now(mem), access_count: entry.access_count + 1}
 
         mem = %{mem | entries: Map.put(mem.entries, key, updated)}
-        {{:ok, updated}, mem}
+        {updated, mem}
 
       :error ->
-        {:error, mem}
+        {nil, mem}
     end
   end
 

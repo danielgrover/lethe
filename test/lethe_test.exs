@@ -167,7 +167,7 @@ defmodule LetheTest do
       later = DateTime.add(base, 60, :second)
       advance_clock(ref, base, 60)
 
-      {{:ok, entry}, mem} = Lethe.get(mem, :k)
+      {entry, mem} = Lethe.get(mem, :k)
 
       assert entry.access_count == 1
       assert entry.last_accessed_at == later
@@ -178,7 +178,7 @@ defmodule LetheTest do
 
     test "returns error for missing key" do
       mem = new_mem()
-      {:error, ^mem} = Lethe.get(mem, :missing)
+      {nil, ^mem} = Lethe.get(mem, :missing)
     end
   end
 

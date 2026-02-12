@@ -30,7 +30,7 @@ mem = Lethe.put(mem, :alert, "Price spike detected", importance: 1.5)
 mem = Lethe.put(mem, :rule, "Never auto-deploy on Fridays", pinned: true)
 
 # Read entries — get/2 refreshes decay (rehearsal), peek/2 doesn't
-{{:ok, entry}, mem} = Lethe.get(mem, :insight)
+{entry, mem} = Lethe.get(mem, :insight)
 {:ok, entry} = Lethe.peek(mem, :alert)
 
 # Query by relevance
@@ -150,7 +150,7 @@ mem = Lethe.clear(mem)                             # remove all entries, keep co
 ### Reading
 
 ```elixir
-{{:ok, entry}, mem} = Lethe.get(mem, :key)         # rehearsal (refreshes decay)
+{entry, mem} = Lethe.get(mem, :key)                # rehearsal (refreshes decay)
 {:ok, entry} = Lethe.peek(mem, :key)               # no side effects
 :error = Lethe.peek(mem, :missing)
 ```

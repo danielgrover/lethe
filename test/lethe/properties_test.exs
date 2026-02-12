@@ -41,7 +41,7 @@ defmodule Lethe.PropertiesTest do
   end
 
   defp apply_operation({:get, key, _value, _importance, _step}, mem) do
-    {_result, mem} = Lethe.get(mem, key)
+    {_entry, mem} = Lethe.get(mem, key)
     mem
   end
 
@@ -286,10 +286,10 @@ defmodule Lethe.PropertiesTest do
       {:ok, after_peek} = Lethe.peek(mem, key)
       assert after_peek.access_count == before_peek.access_count
 
-      {{:ok, after_get}, mem} = Lethe.get(mem, key)
+      {after_get, mem} = Lethe.get(mem, key)
       assert after_get.access_count == before_peek.access_count + 1
 
-      {{:ok, after_get2}, _mem} = Lethe.get(mem, key)
+      {after_get2, _mem} = Lethe.get(mem, key)
       assert after_get2.access_count == before_peek.access_count + 2
     end
   end
