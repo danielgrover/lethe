@@ -41,6 +41,31 @@ defmodule LetheTest do
         Lethe.new(bogus: true)
       end
     end
+
+    test "raises on non-positive max_entries" do
+      assert_raise ArgumentError, fn -> Lethe.new(max_entries: 0) end
+      assert_raise ArgumentError, fn -> Lethe.new(max_entries: -1) end
+    end
+
+    test "raises on non-positive half_life" do
+      assert_raise ArgumentError, fn -> Lethe.new(half_life: 0) end
+      assert_raise ArgumentError, fn -> Lethe.new(half_life: -100) end
+    end
+
+    test "raises on invalid decay_fn" do
+      assert_raise ArgumentError, fn -> Lethe.new(decay_fn: :bogus) end
+    end
+
+    test "raises when summarize_threshold < eviction_threshold" do
+      assert_raise ArgumentError, fn ->
+        Lethe.new(summarize_threshold: 0.01, eviction_threshold: 0.1)
+      end
+    end
+
+    test "raises on out-of-range eviction_threshold" do
+      assert_raise ArgumentError, fn -> Lethe.new(eviction_threshold: -0.1) end
+      assert_raise ArgumentError, fn -> Lethe.new(eviction_threshold: 1.5) end
+    end
   end
 
   describe "put/2 (auto-key)" do
@@ -78,6 +103,30 @@ defmodule LetheTest do
       assert {:ok, entry} = Lethe.peek(mem, :k)
       assert entry.value == "v2"
     end
+
+    test "replace at capacity does not evict" do
+      mem = new_mem(max_entries: 2) |> Lethe.put(:a, "1") |> Lethe.put(:b, "2")
+      mem = Lethe.put(mem, :a, "updated")
+
+      assert Lethe.size(mem) == 2
+      assert {:ok, entry} = Lethe.peek(mem, :a)
+      assert entry.value == "updated"
+      assert {:ok, _} = Lethe.peek(mem, :b)
+    end
+
+    test "auto-key advances when explicit key matches next_key" do
+      mem = new_mem() |> Lethe.put("first")
+      # auto-key 1 used, next_key is now 2
+      mem = Lethe.put(mem, 2, "explicit at 2")
+      # explicit key 2 == next_key, so next_key advances to 3
+      mem = Lethe.put(mem, "third")
+
+      assert Lethe.size(mem) == 3
+      assert {:ok, _} = Lethe.peek(mem, 1)
+      assert {:ok, _} = Lethe.peek(mem, 2)
+      assert {:ok, entry} = Lethe.peek(mem, 3)
+      assert entry.value == "third"
+    end
   end
 
   describe "put/4 (with opts)" do
@@ -90,6 +139,12 @@ defmodule LetheTest do
       assert entry.importance == 1.5
       assert entry.pinned == true
       assert entry.metadata == %{source: :test}
+    end
+
+    test "raises on unknown option keys" do
+      assert_raise ArgumentError, ~r/unknown option/, fn ->
+        new_mem() |> Lethe.put(:k, "v", bogus: true)
+      end
     end
   end
 
@@ -149,6 +204,19 @@ defmodule LetheTest do
       # config preserved
       assert mem.max_entries == 100
     end
+
+    test "preserves function options" do
+      clock_fn = fn -> ~U[2026-01-01 00:00:00Z] end
+      summarize_fn = fn entry -> "summary: #{entry.value}" end
+
+      mem =
+        Lethe.new(clock_fn: clock_fn, summarize_fn: summarize_fn)
+        |> Lethe.put(:k, "v")
+        |> Lethe.clear()
+
+      assert mem.clock_fn == clock_fn
+      assert mem.summarize_fn == summarize_fn
+    end
   end
 
   describe "size/1" do
@@ -159,6 +227,28 @@ defmodule LetheTest do
     test "reflects entry count" do
       mem = new_mem() |> Lethe.put("a") |> Lethe.put("b") |> Lethe.put("c")
       assert Lethe.size(mem) == 3
+    end
+  end
+
+  describe "keys/1" do
+    test "returns all keys" do
+      mem = new_mem() |> Lethe.put(:a, "1") |> Lethe.put(:b, "2")
+      assert Enum.sort(Lethe.keys(mem)) == [:a, :b]
+    end
+
+    test "returns [] for empty" do
+      assert Lethe.keys(new_mem()) == []
+    end
+  end
+
+  describe "has_key?/2" do
+    test "returns true for existing key" do
+      mem = new_mem() |> Lethe.put(:a, "1")
+      assert Lethe.has_key?(mem, :a)
+    end
+
+    test "returns false for missing key" do
+      refute Lethe.has_key?(new_mem(), :missing)
     end
   end
 
@@ -205,6 +295,10 @@ defmodule LetheTest do
       assert Map.has_key?(map, :b)
       assert is_float(map[:a])
     end
+
+    test "returns empty map for empty memory" do
+      assert Lethe.score_map(new_mem()) == %{}
+    end
   end
 
   describe "active/1" do
@@ -220,6 +314,10 @@ defmodule LetheTest do
       assert :new in keys
       refute :old in keys
     end
+
+    test "returns [] for empty memory" do
+      assert Lethe.active(new_mem()) == []
+    end
   end
 
   describe "above/2" do
@@ -234,6 +332,22 @@ defmodule LetheTest do
       assert :new in keys
       refute :old in keys
     end
+
+    test "threshold 0.0 returns all entries" do
+      mem = new_mem() |> Lethe.put(:a, "1") |> Lethe.put(:b, "2")
+      assert length(Lethe.above(mem, 0.0)) == 2
+    end
+
+    test "returns entries sorted by score descending" do
+      {mem, ref, base} = new_mem_with_clock()
+      mem = Lethe.put(mem, :old, "old")
+      advance_clock(ref, base, 1800)
+      mem = Lethe.put(mem, :new, "new")
+
+      result = Lethe.above(mem, 0.0)
+      assert hd(result).key == :new
+      assert List.last(result).key == :old
+    end
   end
 
   describe "top/2" do
@@ -246,6 +360,22 @@ defmodule LetheTest do
       mem = new_mem() |> Lethe.put(:a, "1")
       assert length(Lethe.top(mem, 10)) == 1
     end
+
+    test "N = 0 returns empty list" do
+      mem = new_mem() |> Lethe.put(:a, "1")
+      assert Lethe.top(mem, 0) == []
+    end
+
+    test "returns entries sorted by score descending" do
+      {mem, ref, base} = new_mem_with_clock()
+      mem = Lethe.put(mem, :old, "old")
+      advance_clock(ref, base, 1800)
+      mem = Lethe.put(mem, :new, "new")
+
+      top = Lethe.top(mem, 2)
+      assert hd(top).key == :new
+      assert List.last(top).key == :old
+    end
   end
 
   describe "active_count/1" do
@@ -256,6 +386,10 @@ defmodule LetheTest do
       mem = Lethe.put(mem, :new, "new")
 
       assert Lethe.active_count(mem) == 1
+    end
+
+    test "returns 0 for empty memory" do
+      assert Lethe.active_count(new_mem()) == 0
     end
   end
 
@@ -268,6 +402,10 @@ defmodule LetheTest do
         |> Lethe.put(:c, "3", pinned: true)
 
       assert Lethe.pinned_count(mem) == 2
+    end
+
+    test "returns 0 for empty memory" do
+      assert Lethe.pinned_count(new_mem()) == 0
     end
   end
 
@@ -282,6 +420,15 @@ defmodule LetheTest do
       result = Lethe.filter(mem, fn entry -> entry.metadata[:source] == :test end)
       keys = Enum.map(result, & &1.key) |> Enum.sort()
       assert keys == [:a, :c]
+    end
+
+    test "returns [] when no matches" do
+      mem = new_mem() |> Lethe.put(:a, "1")
+      assert Lethe.filter(mem, fn _ -> false end) == []
+    end
+
+    test "returns [] for empty memory" do
+      assert Lethe.filter(new_mem(), fn _ -> true end) == []
     end
   end
 
@@ -311,6 +458,73 @@ defmodule LetheTest do
       assert stats.newest_entry == DateTime.add(base, 60, :second)
       assert is_float(stats.mean_score)
       assert is_float(stats.median_score)
+    end
+
+    test "median with odd number of entries" do
+      mem =
+        new_mem()
+        |> Lethe.put(:a, "1")
+        |> Lethe.put(:b, "2")
+        |> Lethe.put(:c, "3")
+
+      stats = Lethe.stats(mem)
+      assert stats.size == 3
+      assert is_float(stats.median_score)
+    end
+
+    test "single entry stats" do
+      mem = new_mem() |> Lethe.put(:a, "1")
+
+      stats = Lethe.stats(mem)
+      assert stats.size == 1
+      assert stats.active == 1
+      assert stats.pinned == 0
+      assert stats.oldest_entry == stats.newest_entry
+      assert stats.mean_score == stats.median_score
+    end
+  end
+
+  describe "clock_fn consistency" do
+    defp counting_clock do
+      counter = :counters.new(1, [:atomics])
+      base = ~U[2026-01-01 00:00:00Z]
+
+      clock_fn = fn ->
+        :counters.add(counter, 1, 1)
+        base
+      end
+
+      {clock_fn, counter}
+    end
+
+    test "scored/1 calls clock_fn exactly once" do
+      {clock_fn, counter} = counting_clock()
+      mem = Lethe.new(clock_fn: clock_fn) |> Lethe.put(:a, "1") |> Lethe.put(:b, "2")
+
+      before = :counters.get(counter, 1)
+      _scored = Lethe.scored(mem)
+
+      assert :counters.get(counter, 1) - before == 1
+    end
+
+    test "stats/1 calls clock_fn exactly once" do
+      {clock_fn, counter} = counting_clock()
+      mem = Lethe.new(clock_fn: clock_fn) |> Lethe.put(:a, "1") |> Lethe.put(:b, "2")
+
+      before = :counters.get(counter, 1)
+      _stats = Lethe.stats(mem)
+
+      assert :counters.get(counter, 1) - before == 1
+    end
+
+    test "evict/1 calls clock_fn exactly once" do
+      {clock_fn, counter} = counting_clock()
+      mem = Lethe.new(clock_fn: clock_fn) |> Lethe.put(:a, "1") |> Lethe.put(:b, "2")
+
+      before = :counters.get(counter, 1)
+      _result = Lethe.evict(mem)
+
+      assert :counters.get(counter, 1) - before == 1
     end
   end
 
@@ -360,6 +574,32 @@ defmodule LetheTest do
       assert :error = Lethe.peek(mem, :recent)
     end
 
+    test "lazy eviction does not call summarize_fn" do
+      counter = :counters.new(1, [:atomics])
+
+      summarize_fn = fn _entry ->
+        :counters.add(counter, 1, 1)
+        "summary"
+      end
+
+      {mem, ref, base} =
+        new_mem_with_clock(
+          max_entries: 2,
+          summarize_fn: summarize_fn,
+          summarize_threshold: 0.3
+        )
+
+      mem = Lethe.put(mem, :a, "1")
+      advance_clock(ref, base, 7200)
+      mem = Lethe.put(mem, :b, "2")
+
+      before = :counters.get(counter, 1)
+      advance_clock(ref, base, 7201)
+      _mem = Lethe.put(mem, :c, "3")
+
+      assert :counters.get(counter, 1) - before == 0
+    end
+
     test "size never exceeds max_entries" do
       {mem, ref, base} = new_mem_with_clock(max_entries: 5)
 
@@ -395,6 +635,40 @@ defmodule LetheTest do
 
       assert evicted == []
       assert Lethe.size(mem) == 1
+    end
+
+    test "empty memory returns empty evicted list" do
+      {mem, evicted} = Lethe.evict(new_mem())
+      assert evicted == []
+      assert Lethe.size(mem) == 0
+    end
+
+    test "all above threshold returns no evictions" do
+      mem = new_mem() |> Lethe.put(:a, "1") |> Lethe.put(:b, "2")
+      {mem, evicted} = Lethe.evict(mem)
+      assert evicted == []
+      assert Lethe.size(mem) == 2
+    end
+
+    test "evicted entries carry summaries when summarize_fn configured" do
+      summarize_fn = fn entry -> "summary of #{entry.value}" end
+
+      {mem, ref, base} =
+        new_mem_with_clock(
+          decay_fn: :exponential,
+          summarize_fn: summarize_fn,
+          summarize_threshold: 0.3,
+          eviction_threshold: 0.01
+        )
+
+      mem = Lethe.put(mem, :old, "old value")
+      advance_clock(ref, base, 86_400)
+
+      {_mem, evicted} = Lethe.evict(mem)
+
+      assert length(evicted) == 1
+      assert hd(evicted).summary == "summary of old value"
+      assert hd(evicted).value == "old value"
     end
   end
 end

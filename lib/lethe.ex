@@ -101,12 +101,17 @@ defmodule Lethe do
 
   ## Options
 
-    * `:importance` - importance multiplier (default: 1.0)
+    * `:importance` - importance multiplier, must be > 0. Values > 1.0 boost the
+      score, values < 1.0 reduce it. The final score is always clamped to 0.0..1.0.
+      (default: 1.0)
     * `:pinned` - whether the entry is exempt from decay (default: false)
     * `:metadata` - arbitrary metadata map (default: %{})
   """
+  @valid_put_opts [:importance, :pinned, :metadata]
+
   @spec put(t(), term(), term(), keyword()) :: t()
   def put(%__MODULE__{} = mem, key, value, opts) do
+    validate_put_opts!(opts)
     ts = now(mem)
 
     entry = %Entry{
@@ -175,8 +180,8 @@ defmodule Lethe do
 
   Preserves metadata, pinned, and importance. No-op if the key doesn't exist.
   """
-  @spec update(t(), term(), term()) :: t()
-  def update(%__MODULE__{} = mem, key, new_value) do
+  @spec replace(t(), term(), term()) :: t()
+  def replace(%__MODULE__{} = mem, key, new_value) do
     ts = now(mem)
 
     update_entry(mem, key, fn entry ->
@@ -233,6 +238,18 @@ defmodule Lethe do
   def size(%__MODULE__{entries: entries}), do: map_size(entries)
 
   @doc """
+  Returns all keys in the memory store.
+  """
+  @spec keys(t()) :: [term()]
+  def keys(%__MODULE__{entries: entries}), do: Map.keys(entries)
+
+  @doc """
+  Returns whether the memory store contains the given key.
+  """
+  @spec has_key?(t(), term()) :: boolean()
+  def has_key?(%__MODULE__{entries: entries}, key), do: Map.has_key?(entries, key)
+
+  @doc """
   Pins an entry, making it exempt from decay. No-op if the key doesn't exist.
   """
   @spec pin(t(), term()) :: t()
@@ -252,7 +269,13 @@ defmodule Lethe do
   Removes all entries below the eviction threshold.
 
   Returns `{new_mem, evicted_entries}`. Pinned entries are never evicted.
-  Entries eligible for summarization are summarized before eviction.
+
+  When a `summarize_fn` is configured, entries below the `summarize_threshold`
+  that don't already have a summary will be summarized before eviction. This
+  means evicted entries in the returned list may have their `summary` field
+  populated, allowing callers to preserve compressed versions of evicted data.
+  Entries that are kept but fall below the summarize threshold are also
+  summarized in-place.
   """
   @spec evict(t()) :: {t(), [Entry.t()]}
   def evict(%__MODULE__{} = mem) do
@@ -439,10 +462,15 @@ defmodule Lethe do
   defp now(%__MODULE__{clock_fn: nil}), do: DateTime.utc_now()
   defp now(%__MODULE__{clock_fn: clock_fn}), do: clock_fn.()
 
-  defp median(sorted, n) when rem(n, 2) == 1, do: Enum.at(sorted, div(n, 2))
-
   defp median(sorted, n) do
-    (Enum.at(sorted, div(n, 2) - 1) + Enum.at(sorted, div(n, 2))) / 2.0
+    tup = List.to_tuple(sorted)
+    mid = div(n, 2)
+
+    if rem(n, 2) == 1 do
+      elem(tup, mid)
+    else
+      (elem(tup, mid - 1) + elem(tup, mid)) / 2.0
+    end
   end
 
   defp insert_entry(%__MODULE__{} = mem, key, %Entry{} = entry) do
@@ -507,8 +535,7 @@ defmodule Lethe do
   end
 
   # Summarizes all eligible entries in the memory store.
-  defp maybe_summarize_entries(%__MODULE__{summarize_fn: nil} = mem, _ts), do: mem
-
+  # Only called from summarize/1 which already guards against nil summarize_fn.
   defp maybe_summarize_entries(%__MODULE__{} = mem, ts) do
     updated_entries =
       Map.new(mem.entries, fn {key, entry} ->
@@ -552,5 +579,14 @@ defmodule Lethe do
       raise ArgumentError,
             "summarize_threshold (#{summarize}) must be >= eviction_threshold (#{eviction})"
     end
+  end
+
+  defp validate_put_opts!(opts) do
+    Enum.each(opts, fn {key, _value} ->
+      unless key in @valid_put_opts do
+        raise ArgumentError,
+              "unknown option #{inspect(key)} for put/4, valid options: #{inspect(@valid_put_opts)}"
+      end
+    end)
   end
 end

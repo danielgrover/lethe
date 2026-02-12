@@ -16,6 +16,16 @@ defmodule Lethe.PinningTest do
       {mem, _ref, _base} = new_mem_with_clock()
       assert Lethe.pin(mem, :missing) == mem
     end
+
+    test "double pin is idempotent" do
+      {mem, _ref, _base} = new_mem_with_clock()
+      mem = Lethe.put(mem, :k, "value")
+      mem = Lethe.pin(mem, :k) |> Lethe.pin(:k)
+
+      {:ok, entry} = Lethe.peek(mem, :k)
+      assert entry.pinned == true
+      assert Lethe.pinned_count(mem) == 1
+    end
   end
 
   describe "unpin/2" do
@@ -31,6 +41,15 @@ defmodule Lethe.PinningTest do
     test "no-op for missing key" do
       {mem, _ref, _base} = new_mem_with_clock()
       assert Lethe.unpin(mem, :missing) == mem
+    end
+
+    test "double unpin is idempotent" do
+      {mem, _ref, _base} = new_mem_with_clock()
+      mem = Lethe.put(mem, :k, "value")
+      mem = Lethe.unpin(mem, :k) |> Lethe.unpin(:k)
+
+      {:ok, entry} = Lethe.peek(mem, :k)
+      assert entry.pinned == false
     end
   end
 
@@ -76,7 +95,7 @@ defmodule Lethe.PinningTest do
 
       mem = Lethe.unpin(mem, :k)
       score = Lethe.score(mem, :k)
-      assert score < 0.01
+      assert score < 0.05
     end
   end
 

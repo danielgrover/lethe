@@ -16,8 +16,7 @@ defmodule Lethe.TestHelpers do
     :persistent_term.put(ref, @base_time)
     on_exit(fn -> :persistent_term.erase(ref) end)
 
-    mem =
-      Lethe.new([clock_fn: fn -> :persistent_term.get(ref) end, decay_fn: :exponential] ++ opts)
+    mem = Lethe.new([clock_fn: fn -> :persistent_term.get(ref) end] ++ opts)
 
     {mem, ref, @base_time}
   end

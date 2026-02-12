@@ -100,13 +100,23 @@ defmodule Lethe.DecayTest do
       score = Decay.compute(entry, @base_time, :access_weighted, @opts)
       assert_in_delta score, 1.0, 0.01
     end
+
+    test "importance 0.5 halves score proportionally" do
+      normal = make_entry(access_count: 10)
+      half_imp = make_entry(access_count: 10, importance: 0.5)
+
+      score_normal = Decay.compute(normal, at(3600), :access_weighted, @opts)
+      score_half = Decay.compute(half_imp, at(3600), :access_weighted, @opts)
+
+      assert_in_delta score_half, score_normal * 0.5, 0.01
+    end
   end
 
   describe "combined" do
     test "fresh entry scores near 1.0" do
       entry = make_entry()
       score = Decay.compute(entry, @base_time, :combined, @opts)
-      assert score > 0.7
+      assert score > 0.95
     end
 
     test "decays over time" do

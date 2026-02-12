@@ -14,7 +14,9 @@ defmodule Lethe.Decay do
 
   `opts` must include `:half_life` (in milliseconds).
   """
-  @spec compute(Entry.t(), DateTime.t(), atom(), keyword()) :: float()
+  @type decay_fn :: :exponential | :access_weighted | :combined
+
+  @spec compute(Entry.t(), DateTime.t(), decay_fn(), keyword()) :: float()
   def compute(%Entry{pinned: true}, _now, _decay_fn, _opts), do: 1.0
 
   def compute(%Entry{} = entry, now, decay_fn, opts) do

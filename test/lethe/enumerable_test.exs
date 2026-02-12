@@ -57,6 +57,32 @@ defmodule Lethe.EnumerableTest do
            })
   end
 
+  test "Enum.member?/2 checks value equality, not just key" do
+    mem = Lethe.new() |> Lethe.put(:a, "original")
+    {:ok, entry} = Lethe.peek(mem, :a)
+
+    assert Enum.member?(mem, entry)
+    refute Enum.member?(mem, %{entry | value: "modified"})
+  end
+
+  test "Enum.member?/2 returns false for non-Entry values" do
+    mem = Lethe.new() |> Lethe.put(:a, "1")
+
+    refute Enum.member?(mem, "not an entry")
+    refute Enum.member?(mem, 42)
+    refute Enum.member?(mem, :a)
+  end
+
+  test "Enum.slice/2 works" do
+    mem =
+      Lethe.new()
+      |> Lethe.put(:a, "1")
+      |> Lethe.put(:b, "2")
+      |> Lethe.put(:c, "3")
+
+    assert length(Enum.slice(mem, 0..1)) == 2
+  end
+
   test "empty mem enumerates to []" do
     assert Enum.to_list(Lethe.new()) == []
   end
