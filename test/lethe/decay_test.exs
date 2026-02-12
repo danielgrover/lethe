@@ -137,6 +137,48 @@ defmodule Lethe.DecayTest do
     end
   end
 
+  describe "custom decay function" do
+    test "accepts a custom 3-arity function" do
+      # Always returns 0.5 regardless of time
+      custom_fn = fn _entry, _now, _opts -> 0.5 end
+      entry = make_entry()
+      score = Decay.compute(entry, at(3600), custom_fn, @opts)
+      assert_in_delta score, 0.5, 0.001
+    end
+
+    test "importance is applied to custom fn result" do
+      custom_fn = fn _entry, _now, _opts -> 0.6 end
+      entry = make_entry(importance: 0.5)
+      score = Decay.compute(entry, at(3600), custom_fn, @opts)
+      assert_in_delta score, 0.3, 0.001
+    end
+
+    test "custom fn result is clamped to 0.0..1.0" do
+      custom_fn = fn _entry, _now, _opts -> 2.0 end
+      entry = make_entry()
+      score = Decay.compute(entry, at(0), custom_fn, @opts)
+      assert score == 1.0
+    end
+
+    test "pinned entries still return 1.0 with custom fn" do
+      custom_fn = fn _entry, _now, _opts -> 0.1 end
+      entry = make_entry(pinned: true)
+      score = Decay.compute(entry, at(3600), custom_fn, @opts)
+      assert score == 1.0
+    end
+
+    test "custom fn receives opts with half_life" do
+      custom_fn = fn _entry, _now, opts ->
+        half_life = Keyword.fetch!(opts, :half_life)
+        if half_life == @half_life, do: 0.75, else: 0.0
+      end
+
+      entry = make_entry()
+      score = Decay.compute(entry, @base_time, custom_fn, @opts)
+      assert_in_delta score, 0.75, 0.001
+    end
+  end
+
   describe "score range invariant" do
     test "all functions produce scores in 0.0..1.0" do
       entries = [

@@ -56,6 +56,18 @@ defmodule LetheTest do
       assert_raise ArgumentError, fn -> Lethe.new(decay_fn: :bogus) end
     end
 
+    test "accepts custom decay function" do
+      custom_fn = fn _entry, _now, _opts -> 0.42 end
+      mem = Lethe.new(decay_fn: custom_fn)
+      mem = Lethe.put(mem, :k, "value")
+      assert_in_delta Lethe.score(mem, :k), 0.42, 0.001
+    end
+
+    test "rejects wrong-arity decay function" do
+      assert_raise ArgumentError, fn -> Lethe.new(decay_fn: fn -> 0.5 end) end
+      assert_raise ArgumentError, fn -> Lethe.new(decay_fn: fn _a, _b -> 0.5 end) end
+    end
+
     test "raises when summarize_threshold < eviction_threshold" do
       assert_raise ArgumentError, fn ->
         Lethe.new(summarize_threshold: 0.01, eviction_threshold: 0.1)
@@ -155,7 +167,7 @@ defmodule LetheTest do
       later = DateTime.add(base, 60, :second)
       advance_clock(ref, base, 60)
 
-      {mem, {:ok, entry}} = Lethe.get(mem, :k)
+      {{:ok, entry}, mem} = Lethe.get(mem, :k)
 
       assert entry.access_count == 1
       assert entry.last_accessed_at == later
@@ -166,7 +178,7 @@ defmodule LetheTest do
 
     test "returns error for missing key" do
       mem = new_mem()
-      {^mem, :error} = Lethe.get(mem, :missing)
+      {:error, ^mem} = Lethe.get(mem, :missing)
     end
   end
 

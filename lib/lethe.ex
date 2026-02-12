@@ -18,7 +18,7 @@ defmodule Lethe do
 
   alias Lethe.Entry
 
-  @valid_decay_fns [:exponential, :access_weighted, :combined]
+  @builtin_decay_fns [:exponential, :access_weighted, :combined]
 
   defstruct entries: %{},
             max_entries: 100,
@@ -30,10 +30,12 @@ defmodule Lethe do
             clock_fn: nil,
             next_key: 1
 
+  @type decay_fn :: :exponential | :access_weighted | :combined | (Entry.t(), DateTime.t(), keyword() -> float())
+
   @type t :: %__MODULE__{
           entries: %{term() => Entry.t()},
           max_entries: pos_integer(),
-          decay_fn: :exponential | :access_weighted | :combined,
+          decay_fn: decay_fn(),
           half_life: pos_integer(),
           eviction_threshold: float(),
           summarize_threshold: float(),
@@ -58,7 +60,10 @@ defmodule Lethe do
   ## Options
 
     * `:max_entries` - hard cap on entry count (default: 100)
-    * `:decay_fn` - `:exponential | :access_weighted | :combined` (default: `:combined`)
+    * `:decay_fn` - `:exponential | :access_weighted | :combined` or a custom function
+      `fn(entry, now, opts) -> raw_score`. The custom function receives the entry, current
+      time, and options (including `:half_life`), and should return a raw score. Importance
+      multiplication and clamping to 0.0..1.0 are applied automatically. (default: `:combined`)
     * `:half_life` - half-life in milliseconds for decay (default: 3,600,000 — 1 hour)
     * `:eviction_threshold` - entries below this score get evicted (default: 0.05)
     * `:summarize_threshold` - entries below this score get summarized (default: 0.15)
@@ -69,7 +74,7 @@ defmodule Lethe do
 
     * `ArgumentError` if `:max_entries` is not a positive integer
     * `ArgumentError` if `:half_life` is not a positive integer
-    * `ArgumentError` if `:decay_fn` is not one of the valid atoms
+    * `ArgumentError` if `:decay_fn` is not a valid atom or function
     * `ArgumentError` if `:eviction_threshold` is outside 0.0..1.0
     * `ArgumentError` if `:summarize_threshold` is less than `:eviction_threshold`
   """
@@ -140,9 +145,12 @@ defmodule Lethe do
   @doc """
   Retrieves an entry by key, refreshing its access metadata (rehearsal).
 
-  Returns `{updated_mem, {:ok, entry}}` or `{mem, :error}`.
+  Returns `{{:ok, entry}, updated_mem}` or `{:error, mem}`.
+
+  Follows the Elixir convention of returning `{result, updated_structure}`
+  (see `Map.get_and_update/3`, `Map.pop/3`).
   """
-  @spec get(t(), term()) :: {t(), {:ok, Entry.t()} | :error}
+  @spec get(t(), term()) :: {{:ok, Entry.t()}, t()} | {:error, t()}
   def get(%__MODULE__{} = mem, key) do
     case Map.fetch(mem.entries, key) do
       {:ok, entry} ->
@@ -150,10 +158,10 @@ defmodule Lethe do
           %{entry | last_accessed_at: now(mem), access_count: entry.access_count + 1}
 
         mem = %{mem | entries: Map.put(mem.entries, key, updated)}
-        {mem, {:ok, updated}}
+        {{:ok, updated}, mem}
 
       :error ->
-        {mem, :error}
+        {:error, mem}
     end
   end
 
@@ -176,12 +184,12 @@ defmodule Lethe do
   end
 
   @doc """
-  Replaces an entry's value, resets last_accessed_at, increments access_count.
+  Updates an entry's value, resets last_accessed_at, increments access_count.
 
   Preserves metadata, pinned, and importance. No-op if the key doesn't exist.
   """
-  @spec replace(t(), term(), term()) :: t()
-  def replace(%__MODULE__{} = mem, key, new_value) do
+  @spec update(t(), term(), term()) :: t()
+  def update(%__MODULE__{} = mem, key, new_value) do
     ts = now(mem)
 
     update_entry(mem, key, fn entry ->
@@ -561,10 +569,12 @@ defmodule Lethe do
     end
   end
 
+  defp validate_decay_fn!(decay_fn) when is_function(decay_fn, 3), do: :ok
+
   defp validate_decay_fn!(decay_fn) do
-    unless decay_fn in @valid_decay_fns do
+    unless decay_fn in @builtin_decay_fns do
       raise ArgumentError,
-            "decay_fn must be one of #{inspect(@valid_decay_fns)}, got: #{inspect(decay_fn)}"
+            "decay_fn must be one of #{inspect(@builtin_decay_fns)} or a 3-arity function, got: #{inspect(decay_fn)}"
     end
   end
 

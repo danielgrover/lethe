@@ -12,14 +12,24 @@ defmodule Lethe.Decay do
   @doc """
   Computes the decay score for an entry at the given time.
 
+  `decay_fn` can be a built-in atom (`:exponential`, `:access_weighted`,
+  `:combined`) or a custom function `fn(entry, now, opts) -> raw_score`.
+  Custom functions receive the full `opts` keyword list (including `:half_life`
+  in milliseconds). Importance multiplication and clamping to 0.0..1.0 are
+  applied automatically after the raw score is computed.
+
   `opts` must include `:half_life` (in milliseconds).
   """
-  @type decay_fn :: :exponential | :access_weighted | :combined
-
-  @spec compute(Entry.t(), DateTime.t(), decay_fn(), keyword()) :: float()
+  @spec compute(Entry.t(), DateTime.t(), Lethe.decay_fn(), keyword()) :: float()
   def compute(%Entry{pinned: true}, _now, _decay_fn, _opts), do: 1.0
 
-  def compute(%Entry{} = entry, now, decay_fn, opts) do
+  def compute(%Entry{} = entry, now, decay_fn, opts) when is_function(decay_fn, 3) do
+    decay_fn.(entry, now, opts)
+    |> Kernel.*(entry.importance)
+    |> clamp(0.0, 1.0)
+  end
+
+  def compute(%Entry{} = entry, now, decay_fn, opts) when is_atom(decay_fn) do
     half_life_ms = Keyword.fetch!(opts, :half_life)
     half_life_s = half_life_ms / 1000.0
 

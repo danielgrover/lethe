@@ -2,13 +2,13 @@ defmodule Lethe.UpdateTest do
   use ExUnit.Case, async: true
   import Lethe.TestHelpers
 
-  describe "replace/3" do
+  describe "update/3" do
     test "changes value and refreshes access time" do
       {mem, ref, base} = new_mem_with_clock()
       mem = Lethe.put(mem, :k, "old")
       advance_clock(ref, base, 60)
 
-      mem = Lethe.replace(mem, :k, "new")
+      mem = Lethe.update(mem, :k, "new")
       {:ok, entry} = Lethe.peek(mem, :k)
 
       assert entry.value == "new"
@@ -19,7 +19,7 @@ defmodule Lethe.UpdateTest do
     test "preserves metadata, pinned, importance" do
       {mem, _ref, _base} = new_mem_with_clock()
       mem = Lethe.put(mem, :k, "v", importance: 1.5, pinned: true, metadata: %{source: :test})
-      mem = Lethe.replace(mem, :k, "new_v")
+      mem = Lethe.update(mem, :k, "new_v")
 
       {:ok, entry} = Lethe.peek(mem, :k)
       assert entry.importance == 1.5
@@ -29,7 +29,7 @@ defmodule Lethe.UpdateTest do
 
     test "no-op for missing key" do
       {mem, _ref, _base} = new_mem_with_clock()
-      assert Lethe.replace(mem, :missing, "val") == mem
+      assert Lethe.update(mem, :missing, "val") == mem
     end
 
     test "preserves summary field" do
@@ -49,7 +49,7 @@ defmodule Lethe.UpdateTest do
       {:ok, entry} = Lethe.peek(mem, :k)
       assert entry.summary == "summary: original"
 
-      mem = Lethe.replace(mem, :k, "updated")
+      mem = Lethe.update(mem, :k, "updated")
       {:ok, entry} = Lethe.peek(mem, :k)
       assert entry.value == "updated"
       assert entry.summary == "summary: original"
