@@ -8,12 +8,12 @@ defmodule Lethe do
 
   ## Serializability
 
-  The `%Lethe{}` struct stores `:decay_fn` as an atom and `:clock_fn` /
-  `:summarize_fn` as anonymous functions. If you need to serialize the struct
-  (e.g. with `:erlang.term_to_binary/1` or JSON), set `:clock_fn` and
-  `:summarize_fn` to `nil` before serializing and re-attach them after
-  deserialization. The decay function is always safe to serialize since it is
-  stored as an atom (`:exponential | :access_weighted | :combined`).
+  The `%Lethe{}` struct stores `:decay_fn` as an atom (when using built-in
+  functions) or as an anonymous function (when using a custom decay function).
+  `:clock_fn` and `:summarize_fn` are also anonymous functions. If you need
+  to serialize the struct (e.g. with `:erlang.term_to_binary/1` or JSON),
+  set any function fields to `nil` (or a built-in atom for `:decay_fn`)
+  before serializing and re-attach them after deserialization.
   """
 
   alias Lethe.Entry
