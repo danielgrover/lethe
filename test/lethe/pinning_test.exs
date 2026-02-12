@@ -1,22 +1,6 @@
 defmodule Lethe.PinningTest do
   use ExUnit.Case, async: true
-
-  defp new_mem_with_clock(opts \\ []) do
-    base = ~U[2026-01-01 00:00:00Z]
-    ref = :erlang.make_ref()
-    :persistent_term.put(ref, base)
-
-    mem =
-      Lethe.new([clock_fn: fn -> :persistent_term.get(ref) end, decay_fn: :exponential] ++ opts)
-
-    {mem, ref, base}
-  end
-
-  defp advance_clock(ref, base, seconds) do
-    :persistent_term.put(ref, DateTime.add(base, seconds, :second))
-  end
-
-  defp cleanup_clock(ref), do: :persistent_term.erase(ref)
+  import Lethe.TestHelpers
 
   describe "pin/2" do
     test "sets pinned flag" do
@@ -57,8 +41,6 @@ defmodule Lethe.PinningTest do
       advance_clock(ref, base, 86_400)
 
       assert Lethe.score(mem, :k) == 1.0
-
-      cleanup_clock(ref)
     end
 
     test "not evicted by evict/1" do
@@ -69,8 +51,6 @@ defmodule Lethe.PinningTest do
       {mem, evicted} = Lethe.evict(mem)
       assert evicted == []
       assert Lethe.size(mem) == 1
-
-      cleanup_clock(ref)
     end
 
     test "not auto-evicted on put at capacity" do
@@ -85,8 +65,6 @@ defmodule Lethe.PinningTest do
       assert Lethe.size(mem) == 2
       assert {:ok, _} = Lethe.peek(mem, :a)
       assert {:ok, _} = Lethe.peek(mem, :c)
-
-      cleanup_clock(ref)
     end
 
     test "unpin allows entry to decay normally" do
@@ -99,8 +77,6 @@ defmodule Lethe.PinningTest do
       mem = Lethe.unpin(mem, :k)
       score = Lethe.score(mem, :k)
       assert score < 0.01
-
-      cleanup_clock(ref)
     end
   end
 

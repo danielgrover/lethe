@@ -5,8 +5,11 @@ defimpl Enumerable, for: Lethe do
     {:ok, map_size(entries)}
   end
 
-  def member?(%Lethe{entries: entries}, %Lethe.Entry{key: key}) do
-    {:ok, Map.has_key?(entries, key)}
+  def member?(%Lethe{entries: entries}, %Lethe.Entry{key: key} = entry) do
+    case Map.fetch(entries, key) do
+      {:ok, ^entry} -> {:ok, true}
+      _ -> {:ok, false}
+    end
   end
 
   def member?(_mem, _value) do
@@ -14,7 +17,8 @@ defimpl Enumerable, for: Lethe do
   end
 
   def reduce(%Lethe{} = mem, acc, fun) do
-    now = Lethe.now(mem)
+    # Snapshot now once for consistent scoring across all entries
+    now = if mem.clock_fn, do: mem.clock_fn.(), else: DateTime.utc_now()
     opts = [half_life: mem.half_life]
 
     sorted_entries =

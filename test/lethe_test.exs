@@ -1,5 +1,6 @@
 defmodule LetheTest do
   use ExUnit.Case, async: true
+  import Lethe.TestHelpers
 
   describe "new/0" do
     test "creates memory with default options" do
@@ -29,8 +30,10 @@ defmodule LetheTest do
     test "accepts clock_fn" do
       fixed = ~U[2026-01-01 00:00:00Z]
       mem = Lethe.new(clock_fn: fn -> fixed end)
+      mem = Lethe.put(mem, :k, "v")
 
-      assert Lethe.now(mem) == fixed
+      {:ok, entry} = Lethe.peek(mem, :k)
+      assert entry.inserted_at == fixed
     end
 
     test "raises on invalid keys" do
@@ -38,12 +41,6 @@ defmodule LetheTest do
         Lethe.new(bogus: true)
       end
     end
-  end
-
-  defp new_mem(opts \\ []) do
-    base = ~U[2026-01-01 00:00:00Z]
-    clock_fn = fn -> base end
-    Lethe.new([clock_fn: clock_fn] ++ opts)
   end
 
   describe "put/2 (auto-key)" do
@@ -98,14 +95,11 @@ defmodule LetheTest do
 
   describe "get/2" do
     test "returns entry and updates access metadata" do
-      base = ~U[2026-01-01 00:00:00Z]
-      later = DateTime.add(base, 60, :second)
-      time = :erlang.make_ref()
-      :persistent_term.put(time, base)
-      mem = Lethe.new(clock_fn: fn -> :persistent_term.get(time) end)
+      {mem, ref, base} = new_mem_with_clock()
       mem = Lethe.put(mem, :k, "v")
+      later = DateTime.add(base, 60, :second)
+      advance_clock(ref, base, 60)
 
-      :persistent_term.put(time, later)
       {mem, {:ok, entry}} = Lethe.get(mem, :k)
 
       assert entry.access_count == 1
@@ -113,8 +107,6 @@ defmodule LetheTest do
       # Struct is updated in memory too
       assert {:ok, stored} = Lethe.peek(mem, :k)
       assert stored.access_count == 1
-
-      :persistent_term.erase(time)
     end
 
     test "returns error for missing key" do
@@ -170,21 +162,6 @@ defmodule LetheTest do
     end
   end
 
-  # Helper for scoring tests: creates mem with mutable clock
-  defp new_mem_with_clock do
-    base = ~U[2026-01-01 00:00:00Z]
-    ref = :erlang.make_ref()
-    :persistent_term.put(ref, base)
-    mem = Lethe.new(clock_fn: fn -> :persistent_term.get(ref) end, decay_fn: :exponential)
-    {mem, ref, base}
-  end
-
-  defp advance_clock(ref, base, seconds) do
-    :persistent_term.put(ref, DateTime.add(base, seconds, :second))
-  end
-
-  defp cleanup_clock(ref), do: :persistent_term.erase(ref)
-
   describe "score/2" do
     test "returns score for existing key" do
       mem = new_mem(decay_fn: :exponential) |> Lethe.put(:k, "v")
@@ -211,8 +188,6 @@ defmodule LetheTest do
       assert first.key == :new
       assert second.key == :old
       assert s1 >= s2
-
-      cleanup_clock(ref)
     end
 
     test "empty returns []" do
@@ -244,8 +219,6 @@ defmodule LetheTest do
       keys = Enum.map(active, & &1.key)
       assert :new in keys
       refute :old in keys
-
-      cleanup_clock(ref)
     end
   end
 
@@ -260,8 +233,6 @@ defmodule LetheTest do
       keys = Enum.map(above_07, & &1.key)
       assert :new in keys
       refute :old in keys
-
-      cleanup_clock(ref)
     end
   end
 
@@ -285,8 +256,6 @@ defmodule LetheTest do
       mem = Lethe.put(mem, :new, "new")
 
       assert Lethe.active_count(mem) == 1
-
-      cleanup_clock(ref)
     end
   end
 
@@ -342,15 +311,12 @@ defmodule LetheTest do
       assert stats.newest_entry == DateTime.add(base, 60, :second)
       assert is_float(stats.mean_score)
       assert is_float(stats.median_score)
-
-      cleanup_clock(ref)
     end
   end
 
   describe "eviction on put" do
     test "evicts lowest-scored unpinned entry when at capacity" do
-      {mem, ref, base} = new_mem_with_clock()
-      mem = %{mem | max_entries: 3}
+      {mem, ref, base} = new_mem_with_clock(max_entries: 3)
 
       mem = Lethe.put(mem, :a, "first")
       advance_clock(ref, base, 1800)
@@ -367,8 +333,6 @@ defmodule LetheTest do
       assert {:ok, _} = Lethe.peek(mem, :b)
       assert {:ok, _} = Lethe.peek(mem, :c)
       assert {:ok, _} = Lethe.peek(mem, :d)
-
-      cleanup_clock(ref)
     end
 
     test "all pinned at capacity is no-op" do
@@ -382,8 +346,7 @@ defmodule LetheTest do
     end
 
     test "pinned entries are never auto-evicted" do
-      {mem, ref, base} = new_mem_with_clock()
-      mem = %{mem | max_entries: 2}
+      {mem, ref, base} = new_mem_with_clock(max_entries: 2)
 
       mem = Lethe.put(mem, :pinned, "important", pinned: true)
       advance_clock(ref, base, 7200)
@@ -395,13 +358,10 @@ defmodule LetheTest do
       assert {:ok, _} = Lethe.peek(mem, :pinned)
       assert {:ok, _} = Lethe.peek(mem, :newest)
       assert :error = Lethe.peek(mem, :recent)
-
-      cleanup_clock(ref)
     end
 
     test "size never exceeds max_entries" do
-      {mem, ref, base} = new_mem_with_clock()
-      mem = %{mem | max_entries: 5}
+      {mem, ref, base} = new_mem_with_clock(max_entries: 5)
 
       for i <- 1..20, reduce: mem do
         mem ->
@@ -409,8 +369,6 @@ defmodule LetheTest do
           Lethe.put(mem, :"key_#{i}", "val_#{i}")
       end
       |> then(fn mem -> assert Lethe.size(mem) <= 5 end)
-
-      cleanup_clock(ref)
     end
   end
 
@@ -426,8 +384,6 @@ defmodule LetheTest do
       assert length(evicted) == 1
       assert hd(evicted).key == :old
       assert Lethe.size(mem) == 1
-
-      cleanup_clock(ref)
     end
 
     test "keeps pinned entries regardless of score" do
@@ -439,8 +395,6 @@ defmodule LetheTest do
 
       assert evicted == []
       assert Lethe.size(mem) == 1
-
-      cleanup_clock(ref)
     end
   end
 end

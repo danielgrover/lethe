@@ -41,13 +41,16 @@ defmodule Lethe.Decay do
   end
 
   # Exponential decay boosted by access frequency.
+  # Normalized to 0.0..1.0 before importance is applied.
   defp access_weighted(entry, now, half_life_s) do
     base = exponential(entry, now, half_life_s)
     frequency_boost = :math.log10(entry.access_count + 1) + 1.0
-    base * frequency_boost
+    min(base * frequency_boost, 1.0)
   end
 
   # ACT-R inspired: blends recency and frequency with a sigmoid normalization.
+  # Sigmoid scaling maps activation=1.0 (fresh) to ~0.98, activation=0.5 to 0.5,
+  # activation=0.0 to ~0.02.
   defp combined(entry, now, half_life_s) do
     seconds_since_access = seconds_since(entry.last_accessed_at, now)
     seconds_since_insert = seconds_since(entry.inserted_at, now)
@@ -64,9 +67,9 @@ defmodule Lethe.Decay do
 
     frequency = :math.log(entry.access_count + 1) * age_factor
 
-    # Combine via sigmoid: recency dominates early, frequency matters over time
+    # Combine via sigmoid: maps [0, 1] activation range to [~0, ~1] output
     activation = recency + frequency
-    sigmoid(activation * 2.0 - 1.0)
+    sigmoid(activation * 8.0 - 4.0)
   end
 
   defp seconds_since(from, to) do

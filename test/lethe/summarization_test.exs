@@ -1,22 +1,6 @@
 defmodule Lethe.SummarizationTest do
   use ExUnit.Case, async: true
-
-  defp new_mem_with_clock(opts \\ []) do
-    base = ~U[2026-01-01 00:00:00Z]
-    ref = :erlang.make_ref()
-    :persistent_term.put(ref, base)
-
-    mem =
-      Lethe.new([clock_fn: fn -> :persistent_term.get(ref) end, decay_fn: :exponential] ++ opts)
-
-    {mem, ref, base}
-  end
-
-  defp advance_clock(ref, base, seconds) do
-    :persistent_term.put(ref, DateTime.add(base, seconds, :second))
-  end
-
-  defp cleanup_clock(ref), do: :persistent_term.erase(ref)
+  import Lethe.TestHelpers
 
   describe "evict/1 with summarize_fn" do
     test "entries below summarize_threshold get summarized" do
@@ -42,8 +26,6 @@ defmodule Lethe.SummarizationTest do
       {_mem, _evicted} = Lethe.evict(mem)
 
       assert_receive {:summarized, :old}
-
-      cleanup_clock(ref)
     end
 
     test "entry.value preserved, entry.summary populated" do
@@ -67,8 +49,6 @@ defmodule Lethe.SummarizationTest do
       {:ok, entry} = Lethe.peek(mem, :old)
       assert entry.value == "original value"
       assert entry.summary == "summarized: original value"
-
-      cleanup_clock(ref)
     end
 
     test "summarize_fn called only once per entry" do
@@ -93,8 +73,6 @@ defmodule Lethe.SummarizationTest do
       _mem = Lethe.summarize(mem)
 
       assert :counters.get(counter, 1) == 1
-
-      cleanup_clock(ref)
     end
   end
 
@@ -107,8 +85,6 @@ defmodule Lethe.SummarizationTest do
       {_mem, evicted} = Lethe.evict(mem)
       assert length(evicted) == 1
       assert hd(evicted).summary == nil
-
-      cleanup_clock(ref)
     end
   end
 
@@ -135,8 +111,6 @@ defmodule Lethe.SummarizationTest do
       # :fresh was just inserted, should not be summarized
       {:ok, fresh_entry} = Lethe.peek(mem, :fresh)
       assert fresh_entry.summary == nil
-
-      cleanup_clock(ref)
     end
 
     test "no-op when summarize_fn is nil" do
@@ -159,8 +133,6 @@ defmodule Lethe.SummarizationTest do
       mem = Lethe.summarize(mem)
       {:ok, entry} = Lethe.peek(mem, :pinned)
       assert entry.summary == nil
-
-      cleanup_clock(ref)
     end
   end
 end

@@ -6,6 +6,7 @@ defmodule Lethe.MixProject do
       app: :lethe,
       version: "0.1.0",
       elixir: "~> 1.19",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -19,6 +20,9 @@ defmodule Lethe.MixProject do
   end
 
   # Run "mix help deps" to learn about dependencies.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
   defp deps do
     [
       {:stream_data, "~> 1.0", only: [:test, :dev], runtime: false},

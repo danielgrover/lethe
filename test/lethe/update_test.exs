@@ -1,22 +1,6 @@
 defmodule Lethe.UpdateTest do
   use ExUnit.Case, async: true
-
-  defp new_mem_with_clock(opts \\ []) do
-    base = ~U[2026-01-01 00:00:00Z]
-    ref = :erlang.make_ref()
-    :persistent_term.put(ref, base)
-
-    mem =
-      Lethe.new([clock_fn: fn -> :persistent_term.get(ref) end, decay_fn: :exponential] ++ opts)
-
-    {mem, ref, base}
-  end
-
-  defp advance_clock(ref, base, seconds) do
-    :persistent_term.put(ref, DateTime.add(base, seconds, :second))
-  end
-
-  defp cleanup_clock(ref), do: :persistent_term.erase(ref)
+  import Lethe.TestHelpers
 
   describe "update/3" do
     test "changes value and refreshes access time" do
@@ -30,8 +14,6 @@ defmodule Lethe.UpdateTest do
       assert entry.value == "new"
       assert entry.access_count == 1
       assert entry.last_accessed_at == DateTime.add(base, 60, :second)
-
-      cleanup_clock(ref)
     end
 
     test "preserves metadata, pinned, importance" do
@@ -63,8 +45,6 @@ defmodule Lethe.UpdateTest do
       assert entry.access_count == 1
       assert entry.last_accessed_at == DateTime.add(base, 60, :second)
       assert entry.value == "value"
-
-      cleanup_clock(ref)
     end
 
     test "no-op for missing key" do
@@ -100,8 +80,6 @@ defmodule Lethe.UpdateTest do
       score_after = Lethe.score(mem, :k)
 
       assert score_after > score_before
-
-      cleanup_clock(ref)
     end
   end
 end

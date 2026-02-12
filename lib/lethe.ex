@@ -5,9 +5,20 @@ defmodule Lethe do
   Entries lose relevance over time unless reinforced through access or marked
   as important. Think of it as a smarter alternative to ring buffers or LRU
   caches, grounded in how human working memory actually works.
+
+  ## Serializability
+
+  The `%Lethe{}` struct stores `:decay_fn` as an atom and `:clock_fn` /
+  `:summarize_fn` as anonymous functions. If you need to serialize the struct
+  (e.g. with `:erlang.term_to_binary/1` or JSON), set `:clock_fn` and
+  `:summarize_fn` to `nil` before serializing and re-attach them after
+  deserialization. The decay function is always safe to serialize since it is
+  stored as an atom (`:exponential | :access_weighted | :combined`).
   """
 
   alias Lethe.Entry
+
+  @valid_decay_fns [:exponential, :access_weighted, :combined]
 
   defstruct entries: %{},
             max_entries: 100,
@@ -31,6 +42,16 @@ defmodule Lethe do
           next_key: pos_integer()
         }
 
+  @type stats :: %{
+          size: non_neg_integer(),
+          active: non_neg_integer(),
+          pinned: non_neg_integer(),
+          oldest_entry: DateTime.t() | nil,
+          newest_entry: DateTime.t() | nil,
+          mean_score: float() | nil,
+          median_score: float() | nil
+        }
+
   @doc """
   Creates a new Lethe memory store with the given options.
 
@@ -43,10 +64,20 @@ defmodule Lethe do
     * `:summarize_threshold` - entries below this score get summarized (default: 0.15)
     * `:summarize_fn` - function called to summarize an entry before eviction (default: nil)
     * `:clock_fn` - injectable clock for testing (default: nil, uses `DateTime.utc_now/0`)
+
+  ## Raises
+
+    * `ArgumentError` if `:max_entries` is not a positive integer
+    * `ArgumentError` if `:half_life` is not a positive integer
+    * `ArgumentError` if `:decay_fn` is not one of the valid atoms
+    * `ArgumentError` if `:eviction_threshold` is outside 0.0..1.0
+    * `ArgumentError` if `:summarize_threshold` is less than `:eviction_threshold`
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
-    struct!(__MODULE__, opts)
+    mem = struct!(__MODULE__, opts)
+    validate!(mem)
+    mem
   end
 
   @doc """
@@ -76,33 +107,28 @@ defmodule Lethe do
   """
   @spec put(t(), term(), term(), keyword()) :: t()
   def put(%__MODULE__{} = mem, key, value, opts) do
-    timestamp = now(mem)
+    ts = now(mem)
 
     entry = %Entry{
       key: key,
       value: value,
-      inserted_at: timestamp,
-      last_accessed_at: timestamp,
+      inserted_at: ts,
+      last_accessed_at: ts,
       access_count: 0,
       pinned: Keyword.get(opts, :pinned, false),
       importance: Keyword.get(opts, :importance, 1.0),
       metadata: Keyword.get(opts, :metadata, %{})
     }
 
-    # If replacing an existing key, no capacity check needed
-    mem =
-      if Map.has_key?(mem.entries, key) or map_size(mem.entries) < mem.max_entries do
-        mem
-      else
-        maybe_evict_one(mem)
-      end
+    replacing? = Map.has_key?(mem.entries, key)
+    at_capacity? = map_size(mem.entries) >= mem.max_entries
 
-    # If eviction failed (all pinned), skip insertion
-    if not Map.has_key?(mem.entries, key) and map_size(mem.entries) >= mem.max_entries do
-      mem
+    if replacing? or not at_capacity? do
+      insert_entry(mem, key, entry)
     else
-      next_key = if key == mem.next_key, do: mem.next_key + 1, else: mem.next_key
-      %{mem | entries: Map.put(mem.entries, key, entry), next_key: next_key}
+      # At capacity with a new key — try to evict, insert if successful
+      evicted_mem = maybe_evict_one(mem, ts)
+      if evicted_mem == mem, do: mem, else: insert_entry(evicted_mem, key, entry)
     end
   end
 
@@ -151,11 +177,13 @@ defmodule Lethe do
   """
   @spec update(t(), term(), term()) :: t()
   def update(%__MODULE__{} = mem, key, new_value) do
+    ts = now(mem)
+
     update_entry(mem, key, fn entry ->
       %{
         entry
         | value: new_value,
-          last_accessed_at: now(mem),
+          last_accessed_at: ts,
           access_count: entry.access_count + 1
       }
     end)
@@ -178,8 +206,10 @@ defmodule Lethe do
   """
   @spec touch(t(), term(), keyword()) :: t()
   def touch(%__MODULE__{} = mem, key, opts) do
+    ts = now(mem)
+
     update_entry(mem, key, fn entry ->
-      entry = %{entry | last_accessed_at: now(mem), access_count: entry.access_count + 1}
+      entry = %{entry | last_accessed_at: ts, access_count: entry.access_count + 1}
 
       case Keyword.fetch(opts, :importance) do
         {:ok, importance} -> %{entry | importance: importance}
@@ -222,19 +252,18 @@ defmodule Lethe do
   Removes all entries below the eviction threshold.
 
   Returns `{new_mem, evicted_entries}`. Pinned entries are never evicted.
+  Entries eligible for summarization are summarized before eviction.
   """
   @spec evict(t()) :: {t(), [Entry.t()]}
   def evict(%__MODULE__{} = mem) do
-    # First, summarize eligible entries
-    mem = maybe_summarize_entries(mem)
+    ts = now(mem)
 
     {keep, evicted} =
-      Enum.split_with(mem.entries, fn {_key, entry} ->
-        entry.pinned or compute_score(mem, entry) >= mem.eviction_threshold
+      Enum.reduce(mem.entries, {[], []}, fn {key, entry}, {kept, evict_acc} ->
+        classify_for_eviction(mem, key, entry, ts, kept, evict_acc)
       end)
 
-    evicted_entries = Enum.map(evicted, fn {_key, entry} -> entry end)
-    {%{mem | entries: Map.new(keep)}, evicted_entries}
+    {%{mem | entries: Map.new(keep)}, evicted}
   end
 
   @doc """
@@ -245,7 +274,8 @@ defmodule Lethe do
   def summarize(%__MODULE__{summarize_fn: nil} = mem), do: mem
 
   def summarize(%__MODULE__{} = mem) do
-    maybe_summarize_entries(mem)
+    ts = now(mem)
+    maybe_summarize_entries(mem, ts)
   end
 
   @doc """
@@ -256,7 +286,7 @@ defmodule Lethe do
   @spec score(t(), term()) :: float() | :error
   def score(%__MODULE__{} = mem, key) do
     case Map.fetch(mem.entries, key) do
-      {:ok, entry} -> compute_score(mem, entry)
+      {:ok, entry} -> compute_score(mem, entry, now(mem))
       :error -> :error
     end
   end
@@ -268,9 +298,11 @@ defmodule Lethe do
   """
   @spec scored(t()) :: [{Entry.t(), float()}]
   def scored(%__MODULE__{} = mem) do
+    ts = now(mem)
+
     mem.entries
     |> Map.values()
-    |> Enum.map(fn entry -> {entry, compute_score(mem, entry)} end)
+    |> Enum.map(fn entry -> {entry, compute_score(mem, entry, ts)} end)
     |> Enum.sort_by(fn {_entry, score} -> score end, :desc)
   end
 
@@ -279,7 +311,8 @@ defmodule Lethe do
   """
   @spec score_map(t()) :: %{term() => float()}
   def score_map(%__MODULE__{} = mem) do
-    Map.new(mem.entries, fn {key, entry} -> {key, compute_score(mem, entry)} end)
+    ts = now(mem)
+    Map.new(mem.entries, fn {key, entry} -> {key, compute_score(mem, entry, ts)} end)
   end
 
   @doc """
@@ -295,10 +328,14 @@ defmodule Lethe do
   """
   @spec above(t(), float()) :: [Entry.t()]
   def above(%__MODULE__{} = mem, threshold) do
+    ts = now(mem)
+
     mem.entries
     |> Map.values()
-    |> Enum.map(fn entry -> {entry, compute_score(mem, entry)} end)
-    |> Enum.filter(fn {_entry, score} -> score >= threshold end)
+    |> Enum.reduce([], fn entry, acc ->
+      score = compute_score(mem, entry, ts)
+      if score >= threshold, do: [{entry, score} | acc], else: acc
+    end)
     |> Enum.sort_by(fn {_entry, score} -> score end, :desc)
     |> Enum.map(fn {entry, _score} -> entry end)
   end
@@ -319,8 +356,10 @@ defmodule Lethe do
   """
   @spec active_count(t()) :: non_neg_integer()
   def active_count(%__MODULE__{} = mem) do
+    ts = now(mem)
+
     Enum.count(mem.entries, fn {_key, entry} ->
-      compute_score(mem, entry) >= mem.eviction_threshold
+      compute_score(mem, entry, ts) >= mem.eviction_threshold
     end)
   end
 
@@ -345,8 +384,8 @@ defmodule Lethe do
   @doc """
   Returns summary statistics about the memory store.
   """
-  @spec stats(t()) :: map()
-  def stats(%__MODULE__{entries: entries} = _mem) when map_size(entries) == 0 do
+  @spec stats(t()) :: stats()
+  def stats(%__MODULE__{entries: entries}) when map_size(entries) == 0 do
     %{
       size: 0,
       active: 0,
@@ -359,25 +398,46 @@ defmodule Lethe do
   end
 
   def stats(%__MODULE__{} = mem) do
-    scores =
-      mem.entries
-      |> Map.values()
-      |> Enum.map(fn entry -> compute_score(mem, entry) end)
-      |> Enum.sort()
+    ts = now(mem)
 
-    entries = Map.values(mem.entries)
-    n = length(scores)
+    {scores, active_count, pinned_count, oldest, newest} =
+      Enum.reduce(mem.entries, {[], 0, 0, nil, nil}, fn {_key, entry},
+                                                        {scores, active, pinned, oldest, newest} ->
+        score = compute_score(mem, entry, ts)
+        active = if score >= mem.eviction_threshold, do: active + 1, else: active
+        pinned = if entry.pinned, do: pinned + 1, else: pinned
+
+        oldest =
+          if oldest == nil or DateTime.compare(entry.inserted_at, oldest) == :lt,
+            do: entry.inserted_at,
+            else: oldest
+
+        newest =
+          if newest == nil or DateTime.compare(entry.inserted_at, newest) == :gt,
+            do: entry.inserted_at,
+            else: newest
+
+        {[score | scores], active, pinned, oldest, newest}
+      end)
+
+    sorted_scores = Enum.sort(scores)
+    n = length(sorted_scores)
 
     %{
       size: map_size(mem.entries),
-      active: active_count(mem),
-      pinned: pinned_count(mem),
-      oldest_entry: entries |> Enum.min_by(& &1.inserted_at, DateTime) |> Map.get(:inserted_at),
-      newest_entry: entries |> Enum.max_by(& &1.inserted_at, DateTime) |> Map.get(:inserted_at),
-      mean_score: Enum.sum(scores) / n,
-      median_score: median(scores, n)
+      active: active_count,
+      pinned: pinned_count,
+      oldest_entry: oldest,
+      newest_entry: newest,
+      mean_score: Enum.sum(sorted_scores) / n,
+      median_score: median(sorted_scores, n)
     }
   end
+
+  # Returns the current timestamp from the clock function or UTC now.
+  @spec now(t()) :: DateTime.t()
+  defp now(%__MODULE__{clock_fn: nil}), do: DateTime.utc_now()
+  defp now(%__MODULE__{clock_fn: clock_fn}), do: clock_fn.()
 
   defp median(sorted, n) when rem(n, 2) == 1, do: Enum.at(sorted, div(n, 2))
 
@@ -385,8 +445,13 @@ defmodule Lethe do
     (Enum.at(sorted, div(n, 2) - 1) + Enum.at(sorted, div(n, 2))) / 2.0
   end
 
-  defp compute_score(%__MODULE__{} = mem, %Entry{} = entry) do
-    Lethe.Decay.compute(entry, now(mem), mem.decay_fn, half_life: mem.half_life)
+  defp insert_entry(%__MODULE__{} = mem, key, %Entry{} = entry) do
+    next_key = if key == mem.next_key, do: mem.next_key + 1, else: mem.next_key
+    %{mem | entries: Map.put(mem.entries, key, entry), next_key: next_key}
+  end
+
+  defp compute_score(%__MODULE__{} = mem, %Entry{} = entry, ts) do
+    Lethe.Decay.compute(entry, ts, mem.decay_fn, half_life: mem.half_life)
   end
 
   defp update_entry(%__MODULE__{} = mem, key, fun) do
@@ -396,59 +461,96 @@ defmodule Lethe do
     end
   end
 
-  # Evicts the single lowest-scored unpinned entry. Summarizes it first if eligible.
-  defp maybe_evict_one(%__MODULE__{} = mem) do
+  # Evicts the single lowest-scored unpinned entry. No summarization —
+  # the entry is being deleted immediately, so summarizing it is wasted work.
+  defp maybe_evict_one(%__MODULE__{} = mem, ts) do
     unpinned =
-      mem.entries
-      |> Enum.reject(fn {_key, entry} -> entry.pinned end)
+      Enum.reject(mem.entries, fn {_key, entry} -> entry.pinned end)
 
     case unpinned do
       [] ->
         mem
 
       entries ->
-        {victim_key, victim} =
-          Enum.min_by(entries, fn {_key, entry} -> compute_score(mem, entry) end)
-
-        # Summarize the victim before evicting, if eligible
-        mem =
-          if should_summarize?(mem, victim) do
-            summarized = %{victim | summary: mem.summarize_fn.(victim)}
-            %{mem | entries: Map.put(mem.entries, victim_key, summarized)}
-          else
-            mem
-          end
+        {victim_key, _victim} =
+          Enum.min_by(entries, fn {_key, entry} -> compute_score(mem, entry, ts) end)
 
         %{mem | entries: Map.delete(mem.entries, victim_key)}
     end
   end
 
-  # Summarizes all eligible entries in the memory store.
-  defp maybe_summarize_entries(%__MODULE__{summarize_fn: nil} = mem), do: mem
+  # Classifies a single entry during evict/1: keep (maybe summarize) or evict.
+  defp classify_for_eviction(_mem, key, %Entry{pinned: true} = entry, _ts, kept, evict_acc) do
+    {[{key, entry} | kept], evict_acc}
+  end
 
-  defp maybe_summarize_entries(%__MODULE__{} = mem) do
+  defp classify_for_eviction(mem, key, entry, ts, kept, evict_acc) do
+    score = compute_score(mem, entry, ts)
+    entry = maybe_summarize_entry(mem, entry, score)
+
+    if score >= mem.eviction_threshold do
+      {[{key, entry} | kept], evict_acc}
+    else
+      {kept, [entry | evict_acc]}
+    end
+  end
+
+  # Summarizes a single entry if eligible (below threshold, no existing summary).
+  defp maybe_summarize_entry(%__MODULE__{summarize_fn: nil}, entry, _score), do: entry
+
+  defp maybe_summarize_entry(%__MODULE__{} = mem, %Entry{} = entry, score) do
+    if not entry.pinned and entry.summary == nil and score < mem.summarize_threshold do
+      %{entry | summary: mem.summarize_fn.(entry)}
+    else
+      entry
+    end
+  end
+
+  # Summarizes all eligible entries in the memory store.
+  defp maybe_summarize_entries(%__MODULE__{summarize_fn: nil} = mem, _ts), do: mem
+
+  defp maybe_summarize_entries(%__MODULE__{} = mem, ts) do
     updated_entries =
       Map.new(mem.entries, fn {key, entry} ->
-        if should_summarize?(mem, entry) do
-          {key, %{entry | summary: mem.summarize_fn.(entry)}}
-        else
-          {key, entry}
-        end
+        score = compute_score(mem, entry, ts)
+        {key, maybe_summarize_entry(mem, entry, score)}
       end)
 
     %{mem | entries: updated_entries}
   end
 
-  defp should_summarize?(%__MODULE__{summarize_fn: nil}, _entry), do: false
-
-  defp should_summarize?(%__MODULE__{} = mem, %Entry{} = entry) do
-    not entry.pinned and
-      entry.summary == nil and
-      compute_score(mem, entry) < mem.summarize_threshold
+  defp validate!(%__MODULE__{} = mem) do
+    validate_pos_integer!(mem.max_entries, "max_entries")
+    validate_pos_integer!(mem.half_life, "half_life")
+    validate_decay_fn!(mem.decay_fn)
+    validate_threshold!(mem.eviction_threshold, "eviction_threshold")
+    validate_threshold!(mem.summarize_threshold, "summarize_threshold")
+    validate_threshold_order!(mem.summarize_threshold, mem.eviction_threshold)
   end
 
-  @doc false
-  @spec now(t()) :: DateTime.t()
-  def now(%__MODULE__{clock_fn: nil}), do: DateTime.utc_now()
-  def now(%__MODULE__{clock_fn: clock_fn}), do: clock_fn.()
+  defp validate_pos_integer!(value, name) do
+    unless is_integer(value) and value > 0 do
+      raise ArgumentError, "#{name} must be a positive integer, got: #{inspect(value)}"
+    end
+  end
+
+  defp validate_decay_fn!(decay_fn) do
+    unless decay_fn in @valid_decay_fns do
+      raise ArgumentError,
+            "decay_fn must be one of #{inspect(@valid_decay_fns)}, got: #{inspect(decay_fn)}"
+    end
+  end
+
+  defp validate_threshold!(value, name) do
+    unless is_number(value) and value >= 0.0 and value <= 1.0 do
+      raise ArgumentError, "#{name} must be in 0.0..1.0, got: #{inspect(value)}"
+    end
+  end
+
+  defp validate_threshold_order!(summarize, eviction) do
+    unless summarize >= eviction do
+      raise ArgumentError,
+            "summarize_threshold (#{summarize}) must be >= eviction_threshold (#{eviction})"
+    end
+  end
 end

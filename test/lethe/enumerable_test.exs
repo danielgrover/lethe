@@ -1,22 +1,6 @@
 defmodule Lethe.EnumerableTest do
   use ExUnit.Case, async: true
-
-  defp new_mem_with_clock(opts \\ []) do
-    base = ~U[2026-01-01 00:00:00Z]
-    ref = :erlang.make_ref()
-    :persistent_term.put(ref, base)
-
-    mem =
-      Lethe.new([clock_fn: fn -> :persistent_term.get(ref) end, decay_fn: :exponential] ++ opts)
-
-    {mem, ref, base}
-  end
-
-  defp advance_clock(ref, base, seconds) do
-    :persistent_term.put(ref, DateTime.add(base, seconds, :second))
-  end
-
-  defp cleanup_clock(ref), do: :persistent_term.erase(ref)
+  import Lethe.TestHelpers
 
   test "Enum.count/1" do
     mem =
@@ -37,8 +21,6 @@ defmodule Lethe.EnumerableTest do
     assert length(entries) == 2
     assert hd(entries).key == :new
     assert List.last(entries).key == :old
-
-    cleanup_clock(ref)
   end
 
   test "Enum.take/2" do
