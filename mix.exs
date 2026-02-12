@@ -21,7 +21,8 @@ defmodule Lethe.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:stream_data, "~> 1.0", only: [:test, :dev], runtime: false}
+      {:stream_data, "~> 1.0", only: [:test, :dev], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 end
